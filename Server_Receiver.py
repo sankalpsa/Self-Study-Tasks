@@ -7,7 +7,7 @@ import time
 from collections import deque
 
 # --- Parameters ---
-CHUNK = 10000
+CHUNK = 1024  # Match sender's CHUNK
 FORMAT = pyaudio.paInt16
 HOST_IP = '0.0.0.0'
 PORT_RTP = 5000
@@ -15,7 +15,7 @@ PORT_SIP = 5060
 FEC_PAYLOAD_TYPE = 127
 
 # --- Jitter Buffer Parameters ---
-JITTER_BUFFER_TARGET_SIZE = 5
+JITTER_BUFFER_TARGET_SIZE = 1  # lower to start playback sooner
 JITTER_BUFFER_MAX_SIZE = 20
 
 # --- Global Events & Shared State ---
@@ -34,6 +34,16 @@ class JitterBuffer:
 
     def add(self, seq, payload, is_fec):
         with self.lock:
+            # Normalize payload size for audio packets so frames match expected CHUNK
+            if not is_fec:
+                expected = CHUNK * 2
+                if len(payload) != expected:
+                    if len(payload) < expected:
+                        payload = payload + (b'\x00' * (expected - len(payload)))
+                        print(f"[JitterBuffer] Padding audio payload seq={seq} from {len(payload)-(expected - len(payload))} to {expected} bytes")
+                    else:
+                        payload = payload[:expected]
+                        print(f"[JitterBuffer] Trimming audio payload seq={seq} from {len(payload)+(len(payload)-expected)} to {expected} bytes")
             if self.playout_pointer == -1 and not is_fec:
                 self.playout_pointer = seq
 
@@ -48,7 +58,7 @@ class JitterBuffer:
             else:
                 self.audio_buffer[seq] = payload
                 self.stats['received'] += 1
-                print(f"⬇️  [RCVD]  Type: AUDIO | Seq: {seq} | Size: {len(payload) + 12} bytes")
+                print(f"⬇️  [RCVD]  Type: AUDIO | Seq: {seq} | Size: {len(payload) + 12} bytes | Buffer size: {len(self.audio_buffer)}")
 
             if len(self.fec_buffer) > JITTER_BUFFER_MAX_SIZE:
                 oldest_fec = min(self.fec_buffer.keys())
@@ -58,9 +68,14 @@ class JitterBuffer:
         with self.lock:
             if self.playout_pointer == -1 or len(self.audio_buffer) < JITTER_BUFFER_TARGET_SIZE:
                 self.stats['underruns'] += 1
-                return b'\x00' * 1024 * 2  # Corresponds to CHUNK size from sender
+                print(f"[JitterBuffer] Underrun or not enough packets. Playout pointer: {self.playout_pointer}, Buffer size: {len(self.audio_buffer)}")
+                return b'\x00' * CHUNK * 2  # Use correct CHUNK size
             if self.playout_pointer in self.audio_buffer:
                 frame = self.audio_buffer.pop(self.playout_pointer)
+                # ensure returned frame is exact size
+                if len(frame) != CHUNK * 2:
+                    frame = frame[:CHUNK * 2].ljust(CHUNK * 2, b'\x00')
+                print(f"[JitterBuffer] Playing out seq {self.playout_pointer}")
                 self.playout_pointer = (self.playout_pointer + 1) & 0xFFFF
                 return frame
 
@@ -74,6 +89,9 @@ class JitterBuffer:
                 if self.playout_pointer in protected_seqs:
                     recovered = self._recover_with_fec(fec_packet[header_end:], protected_seqs)
                     if recovered:
+                        # ensure recovered size is correct
+                        if len(recovered) != CHUNK * 2:
+                            recovered = recovered[:CHUNK * 2].ljust(CHUNK * 2, b'\x00')
                         self.stats['recovered'] += 1
                         print(f"✅ [RECOVER] Packet {self.playout_pointer} successfully recovered using FEC {fec_seq}.")
                         del self.fec_buffer[fec_seq]
@@ -82,7 +100,7 @@ class JitterBuffer:
 
             print(f"❌ [FAILED]  Recovery failed for packet {self.playout_pointer}. Playing silence.")
             self.playout_pointer = (self.playout_pointer + 1) & 0xFFFF
-            return b'\x00' * 1024 * 2
+            return b'\x00' * CHUNK * 2  # Use correct CHUNK size
 
     def _recover_with_fec(self, fec_payload, protected_seqs):
         missing_seq = self.playout_pointer
@@ -99,10 +117,13 @@ class JitterBuffer:
 
 class RTPReceiver:
     def __init__(self, jitter_buffer):
+        # allow quick reuse and bind
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.audio = pyaudio.PyAudio()
         self.output_stream = None
         self.jitter_buffer = jitter_buffer
+        self.sender_addr = None  # Store sender address for ACKs
 
     def audio_callback(self, in_data, frame_count, time_info, status):
         if status == pyaudio.paOutputUnderflow:
@@ -113,10 +134,13 @@ class RTPReceiver:
     def run(self):
         self.socket.bind((HOST_IP, PORT_RTP))
         print(f"🎧 RTP: Receiver waiting on {HOST_IP}:{PORT_RTP}")
+        print(f"🎧 RTP: Local address is {self.socket.getsockname()}")
 
         if not start_streaming.wait(timeout=60):
             print("❌ RTP: Timed out. Exiting.")
             return
+
+        print("✅ RTP: SIP handshake complete, ready to receive RTP packets.")
 
         try:
             # --- CRITICAL FIX: DYNAMICALLY GET OUTPUT DEVICE SPECS ---
@@ -138,7 +162,7 @@ class RTPReceiver:
                 channels=channels,
                 rate=rate,
                 output=True,
-                frames_per_buffer=1024,  # CHUNK size from sender
+                frames_per_buffer=CHUNK,  # Use correct CHUNK size
                 stream_callback=self.audio_callback
             )
             self.output_stream.start_stream()
@@ -156,13 +180,35 @@ class RTPReceiver:
             self.cleanup()
 
     def receive_packets(self):
+        # increase recv buffer and timeout
+        self.socket.settimeout(5.0)
+        last_packet_time = time.time()
         while not end_call.is_set():
             try:
-                packet, _ = self.socket.recvfrom(2048)
+                packet, sender_addr = self.socket.recvfrom(8192)
+                self.sender_addr = sender_addr  # Save sender address for ACKs
+                last_packet_time = time.time()
+                if len(packet) < 12:
+                    print(f"[RTPReceiver] Received packet too short: {len(packet)} bytes")
+                    continue
                 header = struct.unpack('!BBHII', packet[:12])
                 payload_type, seq = header[1] & 0x7F, header[2]
+                if payload_type == FEC_PAYLOAD_TYPE:
+                    print(f"[RTPReceiver] Received FEC packet, seq={seq}, size={len(packet)}")
+                else:
+                    print(f"[RTPReceiver] Received AUDIO packet, seq={seq}, size={len(packet)}")
                 self.jitter_buffer.add(seq, packet[12:], payload_type == FEC_PAYLOAD_TYPE)
-            except Exception:
+                # --- Send ACK for AUDIO packets only ---
+                if payload_type != FEC_PAYLOAD_TYPE and self.sender_addr:
+                    ack_msg = struct.pack('!4sH', b'ACK!', seq)
+                    self.socket.sendto(ack_msg, self.sender_addr)
+            except socket.timeout:
+                now = time.time()
+                if now - last_packet_time > 5:
+                    print("[RTPReceiver] No RTP packets received in the last 5 seconds.")
+                    last_packet_time = now
+            except Exception as e:
+                print(f"[RTPReceiver] Exception in receive_packets: {e}")
                 break
 
     def cleanup(self):
