@@ -8,7 +8,7 @@ import signal
 import hashlib
 
 # --- Parameters (Audio settings will now be determined dynamically) ---
-CHUNK = 1024
+CHUNK = 1024  # Ensure this matches receiver
 RECEIVER_IP = '127.0.0.1'
 PORT_RTP = 5000
 PORT_SIP = 5060
@@ -67,6 +67,7 @@ class SIPClient:
                     self.server_addr = addr
                     if b"200 OK" in response:
                         print("✅ SIP: Call established!")
+                        print(f"✅ SIP: RTP will be sent to {RECEIVER_IP}:{PORT_RTP}")
                         start_streaming.set()
                 except socket.timeout:
                     print("📞 SIP: Timeout, retrying INVITE...")
@@ -90,12 +91,19 @@ class RTPClient:
         self.input_stream = None
         self.fec_generator = FECGenerator(FEC_RATIO)
         self.ssrc = int(time.time()) & 0xFFFFFFFF
+        self.timestamp = 0  # Monotonic RTP timestamp
+        self.ack_thread = None
+        self.running = True
 
     def run(self):
         if not start_streaming.wait(timeout=30):
             print("❌ RTP: Timeout waiting for SIP call.")
             return
 
+        print(f"🔗 RTP: Sending packets to {RECEIVER_IP}:{PORT_RTP}")
+        # Start ACK listener thread
+        self.ack_thread = threading.Thread(target=self.listen_for_acks, daemon=True)
+        self.ack_thread.start()
         try:
             device_info = self.audio.get_default_input_device_info()
             rate = int(device_info['defaultSampleRate'])
@@ -122,12 +130,13 @@ class RTPClient:
             print("🎙️  Microphone is open. Streaming audio...")
 
             packet_count = 0
+            self.timestamp = 0  # Start at zero
             while not end_call.is_set():
                 raw_data = self.input_stream.read(CHUNK, exception_on_overflow=False)
 
                 sequence_number = packet_count & 0xFFFF
-                timestamp = int(time.time() * rate) & 0xFFFFFFFF
-                header = struct.pack('!BBHII', 0x80, 0, sequence_number, timestamp, self.ssrc)
+                # Use monotonic timestamp, increment by CHUNK each packet
+                header = struct.pack('!BBHII', 0x80, 0, sequence_number, self.timestamp, self.ssrc)
                 audio_packet = header + raw_data
                 self.socket.sendto(audio_packet, (RECEIVER_IP, PORT_RTP))
 
@@ -137,8 +146,9 @@ class RTPClient:
                 if self.fec_generator.should_send_fec():
                     fec_payload, protected_seqs = self.fec_generator.generate_fec_packet()
                     if fec_payload:
-                        fec_seq = (packet_count + 30000) & 0xFFFF
-                        fec_header = struct.pack('!BBHII', 0x80, FEC_PAYLOAD_TYPE, fec_seq, timestamp, self.ssrc)
+                        fec_seq = (packet_count + 30000) & 0xFFFF  # Still unique, but not critical
+                        # Use correct payload type for FEC
+                        fec_header = struct.pack('!BBHII', 0x80, FEC_PAYLOAD_TYPE, fec_seq, self.timestamp, self.ssrc)
                         fec_packet = fec_header + fec_payload
                         self.socket.sendto(fec_packet, (RECEIVER_IP, PORT_RTP))
 
@@ -147,6 +157,7 @@ class RTPClient:
                             f"⬆️  [SENT]  Type: FEC   | Seq: {fec_seq} | Size: {len(fec_packet)} bytes | Protects: [{protected_str}]")
 
                 packet_count += 1
+                self.timestamp = (self.timestamp + CHUNK) & 0xFFFFFFFF  # Increment timestamp
 
         except Exception as e:
             print(f"\n--- FATAL ERROR in RTPClient ---")
@@ -157,9 +168,23 @@ class RTPClient:
             print("2. Check your OS microphone permissions for your terminal/IDE.")
             print("3. Unplug and replug your microphone if it's external.")
             print("---------------------------------\n")
-
         finally:
+            self.running = False
             self.cleanup()
+
+    def listen_for_acks(self):
+        self.socket.settimeout(1.0)
+        while self.running and not end_call.is_set():
+            try:
+                data, addr = self.socket.recvfrom(64)
+                if data.startswith(b'ACK!'):
+                    seq = struct.unpack('!4sH', data)[1]
+                    print(f"✅ RTP: Received ACK for seq {seq} from {addr}")
+            except socket.timeout:
+                continue
+            except Exception as e:
+                print(f"RTP ACK listener error: {e}")
+                break
 
     def cleanup(self):
         if self.input_stream: self.input_stream.close()
