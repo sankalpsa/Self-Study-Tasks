@@ -1,66 +1,150 @@
-# VoIP Audio Streaming with SIP, RTP, and FEC
+📞 VoIP Softphone - Internet Ready (SIP & RTP)
 
-This project is a real-time, one-way Voice over IP (VoIP) audio streaming application built in Python. It uses a client-server model to stream audio from a microphone to a speaker, implementing standard communication protocols and advanced features for reliability.
+A complete, responsive, cross-platform VoIP softphone application built with Python (PyQt5) and leveraging custom SIP and RTP protocol implementations for robust voice communication over the internet.
 
-The `Server_Receiver.py` script listens for an incoming call, while the `Client_Sender.py` script captures audio and streams it to the server. The system is designed for resilience against network packet loss through a custom Forward Error Correction (FEC) implementation.
+✨ Features
 
-## Features
+Custom SIP & RTP Implementation: Minimalist, hand-coded signaling (SIP) and media transport (RTP) for educational and practical purposes.
 
-### Core Functionality
-- **SIP Call Management**: A lightweight implementation of the Session Initiation Protocol (SIP) handles call initiation (`INVITE`) and termination (`BYE`), ensuring a proper session is established before audio streaming begins.
-- **RTP Audio Streaming**: Audio is captured from the microphone, packetized according to the Real-time Transport Protocol (RTP), and streamed over UDP for low-latency transmission.
-- **Dynamic Audio Configuration**: The sender and receiver automatically detect the host machine's default microphone and speaker settings (sample rate, channels), making it plug-and-play without manual configuration.
+Audio Processing: Utilizes PyAudio for real-time audio I/O and implements G.711 $\mu$-law encoding/decoding.
 
-### Advanced Features
-- **Forward Error Correction (FEC)**: The sender periodically generates FEC packets by XORing a batch of recent audio packets. If the receiver detects a lost audio packet, it can use the corresponding FEC packet to reconstruct the missing data, significantly improving audio quality on unreliable networks.
-- **Jitter Buffer**: The receiver implements a dynamic jitter buffer to handle network jitter (variable packet arrival times). This ensures smooth, uninterrupted audio playback by absorbing delays and reordering packets if necessary.
-- **Packet Loss Detection & Recovery**: The receiver actively monitors RTP sequence numbers to detect lost packets. Upon detection, it attempts to recover the lost packet using the FEC mechanism.
-- **Graceful Shutdown**: The application supports a clean shutdown process. Pressing `Ctrl+C` in either terminal sends a SIP `BYE` message to terminate the call and properly closes all network sockets and audio streams.
-- **Real-time Statistics**: On shutdown, the receiver prints a final report detailing the number of packets received, lost, and successfully recovered via FEC, providing clear insight into the stream's performance.
+Quality of Service (QoS): Includes a Jitter Buffer for packet delay compensation and Forward Error Correction (FEC) via XOR redundancy to mitigate packet loss.
 
-## How to Run
+NAT Traversal: Built-in STUN (Session Traversal Utilities for NAT) mechanism to automatically discover and use the public IP address and port, simplifying connection setup across different networks.
 
-Follow these instructions to set up and run the VoIP application.
+Cross-Network Connectivity: Supports multiple connection methods: Localhost, Local Network (LAN), and Internet-based communication with Public IP/Port Forwarding.
 
-### Prerequisites
+Responsive UI: A clean, modern, and responsive interface built with PyQt5 featuring a dial pad, contact manager, and real-time status/debug logging.
 
-You must have Python 3 installed on your system. The only external library required is `PyAudio`.
+Real-time Status: Displays local/public IP, call status, and call duration.
 
-### Installation
+🚀 Getting Started
 
-1.  **Install PyAudio:**
-    You can install the necessary library using pip.
+Prerequisites
 
-    ```
-    pip install pyaudio
-    ```
-    > **Note**: On some operating systems (like Linux or macOS), `PyAudio` may require you to install system dependencies first. For example, on Debian/Ubuntu, you might need to run: `sudo apt-get install portaudio19-dev python3-pyaudio`.
+You need Python 3.x installed on your system.
 
-### Usage
+Installation
 
-The client and server are configured to run on the same machine (`localhost`). To run them on different machines, change the `RECEIVER_IP` variable in `Client_Sender.py` to the IP address of the server machine.
+Install the required Python libraries using pip:
 
-1.  **Start the Server**
-    Open a terminal and run the `Server_Receiver.py` script. The server will initialize and wait for an incoming call.
+pip install pyaudio PyQt5 requests
 
-    ```
-    python Server_Receiver.py
-    ```
-    You will see the following output, confirming the server is ready:
-    ```
-    🚀 VoIP Receiver Ready | Waiting for call...
-    📞 SIP: Server listening on 0.0.0.0:5060
-    🎧 RTP: Receiver waiting on 0.0.0.0:5000
-    ```
 
-2.  **Start the Client**
-    Open a **new terminal** and run the `Client_Sender.py` script. This will initiate the SIP call to the server.
+⚠️ Windows Users (PyAudio Specifics):
 
-    ```
-    python Client_Sender.py
-    ```
-    Once the server accepts the call, the client will start capturing audio from your default microphone and streaming it. Both terminals will display real-time logs of the packets being sent and received.
+If you encounter issues installing pyaudio on Windows, you may need to use pipwin:
 
-### Stopping the Application
+pip install pipwin
+pipwin install pyaudio
 
-To end the session, press `Ctrl+C` in **either** the client or the server terminal. This will trigger a graceful shutdown, terminate the call via a SIP `BYE` message, and close both applications. The server will then display the final stream quality statistics.
+
+Running the Application
+
+Execute the main Python script (replace your_softphone_file_name.py with your actual file name):
+
+python your_softphone_file_name.py
+
+
+🌐 Network Setup Guide
+
+Connecting two softphones over the internet can be challenging due to Network Address Translation (NAT). This application provides multiple methods, with the built-in STUN being the most convenient.
+
+⭐ Recommended Method: Built-in STUN (Automatic)
+
+This method attempts to automatically discover your public IP and port, enabling NAT traversal without manual router configuration.
+
+Start the App: Both users launch the softphone.
+
+Get Public IP: Click the "🔄 Refresh" button to run the STUN query and detect your Public IP.
+
+Share IPs: Share the displayed Public IP with the other person.
+
+Connect: Each user enters the other's Public IP into the input field and clicks "📞 Call".
+
+🛠️ Manual Method: Public IP + Port Forwarding
+
+This method ensures reliable connectivity but requires access to your router settings.
+
+Find your Public IP: Use the displayed IP or visit a site like https://whatismyipaddress.com/.
+
+Port Forwarding: On your home router, forward the following UDP ports to your computer's Local IP (e.g., 192.168.1.100):
+
+RTP Media Port: 5004 (UDP)
+
+SIP Signaling Port: 5062 (UDP)
+
+Connect: Both users enter each other's Public IP and initiate the call.
+
+🧪 Simple Testing: Local Network (LAN) or VPN
+
+For simple testing, use one of these methods:
+
+Local Test: Use 127.0.0.1 in the IP field to call yourself (requires two instances or loopback configuration).
+
+Same WiFi/LAN: Use the Local IP (e.g., 192.168.x.x) of the other computer.
+
+VPN: Both users connect to the same VPN (e.g., Hamachi, ZeroTier, Tailscale) and use the VPN-assigned IP addresses.
+
+⚠️ Carrier-Grade NAT (CGNAT) Warning:
+Mobile hotspots and some ISPs use CGNAT, which often blocks incoming connections, making the Public IP/Port Forwarding method impossible. In such cases, one user must be on a network that permits port forwarding, or both must use a VPN solution.
+
+⚙️ Technical Details
+
+Protocol/Function
+
+Technology/Port
+
+Purpose
+
+SIP
+
+Custom UDP / 5062
+
+Signaling (INVITE, 200 OK, BYE)
+
+RTP
+
+Custom UDP / 5004
+
+Real-time media transport
+
+Codec
+
+G.711 $\mu$-law
+
+Audio encoding/decoding
+
+NAT Traversal
+
+STUN / 19302
+
+Public IP and port discovery
+
+QoS
+
+Jitter Buffer
+
+Compensates for network delay variation
+
+QoS
+
+Forward Error Correction (FEC)
+
+Mitigates packet loss
+
+UI
+
+PyQt5
+
+Cross-platform desktop interface
+
+🤝 Contribution
+
+This project is primarily a demonstration of core VoIP and networking concepts. Feel free to fork, modify, and experiment. If you find a bug or have a suggestion, please open an issue!
+
+📝 License
+
+This project is open-source. See the repository for specific licensing details.
+
+Built with passion for networking and real-time communication.
